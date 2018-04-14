@@ -9,7 +9,14 @@ from sklearn.model_selection import train_test_split
 from sklearn.svm import SVC
 from sklearn.model_selection import GridSearchCV
 from sklearn.model_selection import StratifiedShuffleSplit
+from scipy.ndimage.measurements import label
+from sklearn.pipeline import Pipeline
+from sklearn.decomposition import PCA
+from sklearn.feature_selection import SelectKBest, chi2
 import time
+from moviepy.editor import VideoFileClip
+import matplotlib.pyplot as plt
+
 
 # Define a color space dict. All image reads done by cv2.imread()
 cs = { 'HSV':    cv2.COLOR_BGR2HSV, 
@@ -33,7 +40,6 @@ rsize = (30,30)
 # color space
 cspace = "LUV"
 
-
 # Define a function to compute binned color features  
 def bin_spatial(img, color_space=cspace, size=rsize):
     # Convert image to new color space (if specified)
@@ -43,6 +49,12 @@ def bin_spatial(img, color_space=cspace, size=rsize):
     features = cv2.resize(image,size).ravel()
     # Return the feature vector
     return features
+    
+# def bin_spatial(img, size=(32, 32)):
+#     color1 = cv2.resize(img[:,:,0], size).ravel()
+#     color2 = cv2.resize(img[:,:,1], size).ravel()
+#     color3 = cv2.resize(img[:,:,2], size).ravel()
+#     return np.hstack((color1, color2, color3))
 
 def color_hist(img, nbins=hb, bins_range=hr):
     # Compute the histogram of the color channels separately
@@ -66,53 +78,40 @@ def hog_by_chan(img,pix_per_cell=ppc,cell_per_block=cpb,orient=ori, rav=True,
     hoglist=[]
     imagelist=[]
     if 1 in chans:
-        h1 = hog(ch1,orientations=orient, pixels_per_cell=(pix_per_cell,pix_per_cell),
+        h = hog(ch1,orientations=orient, pixels_per_cell=(pix_per_cell,pix_per_cell),
                         cells_per_block=(cell_per_block,cell_per_block), visualise=vis,
                         feature_vector=False,block_norm='L2-Hys')
-        hoglist.append(h1[0])
-        if vis:
-            imagelist.append(h1[1])
+        if not vis:
+            hoglist.append(h)
+        else:
+            hoglist.append(h[0])    
+            imagelist.append(h[1])
     if 2 in chans:
-        h2 = hog(ch2,orientations=orient, pixels_per_cell=(pix_per_cell,pix_per_cell),
-                    cells_per_block=(cell_per_block,cell_per_block), visualise=vis,
-                    feature_vector=False,block_norm='L2-Hys')
-        hoglist.append(h2[0])
-        if vis:
-            imagelist.append(h2[1])
+        h = hog(ch1,orientations=orient, pixels_per_cell=(pix_per_cell,pix_per_cell),
+                        cells_per_block=(cell_per_block,cell_per_block), visualise=vis,
+                        feature_vector=False,block_norm='L2-Hys')
+        if not vis:
+            hoglist.append(h)
+        else:
+            hoglist.append(h[0])    
+            imagelist.append(h[1])
     if 3 in chans:
-        h3 = hog(ch3,orientations=orient, pixels_per_cell=(pix_per_cell,pix_per_cell),
-                    cells_per_block=(cell_per_block,cell_per_block), visualise=vis,
-                    feature_vector=False,block_norm='L2-Hys')
-        hoglist.append(h3[0])
-        if vis:
-            imagelist.append(h3[1])
+        h = hog(ch1,orientations=orient, pixels_per_cell=(pix_per_cell,pix_per_cell),
+                        cells_per_block=(cell_per_block,cell_per_block), visualise=vis,
+                        feature_vector=False,block_norm='L2-Hys')
+        if not vis:
+            hoglist.append(h)
+        else:
+            hoglist.append(h[0])    
+            imagelist.append(h[1])
     if rav:
-        hlist = []
-        for HOG in hoglist:
-            hlist.append(HOG.ravel())
+        HOG = np.ravel(hoglist)
         if vis:
-            return np.hstack(tuple(hlist)), imagelist
-        return np.hstack(tuple(hlist))
+            return HOG, imagelist
+        return HOG
     elif vis:
         return hoglist,imagelist
     return hoglist
- 
-# def extract_features(imageFiles, cspace=cspace, spatial_size=rsize,
-#                         hist_bins=hb, hist_range=hr):
-#     features = []
-#     for file in imageFiles:
-#         # Assure that all images are of the same size and type
-#         image = cv2.resize(cv2.imread(file),(64,64)).astype(np.float32)
-#         # Apply bin_spatial() to get spatial color features
-#         s_features = bin_spatial(image, size=spatial_size)
-#         # Apply color_hist() to get color histogram features
-#         hist_features = color_hist(image, nbins=hist_bins, bins_range=hist_range)
-#         # Apply get_hog_features to get HOG features
-#         hog_features = hog_by_chan(image,feature_vec=True)
-#         # Append the new feature vector to the features list
-#         features.append(np.concatenate((s_features,hist_features,hog_features)))
-#     # Return list of feature vectors
-#     return features
 
 def extract_features(image, cspace=cspace, spatial_size=rsize,
                         hist_bins=hb, hist_range=hr, Hogs=True):
@@ -183,6 +182,34 @@ def slide_window(img, x_start_stop=[None, None], y_start_stop=[None, None],
     # Return the list of windows
     return window_list
 
+def add_heat(heatmap, bbox_list):
+    # Iterate through list of bboxes
+    for box in bbox_list:
+        # Add += 1 for all pixels inside each bbox
+        # Assuming each "box" takes the form ((x1, y1), (x2, y2))
+        heatmap[box[0][1]:box[1][1], box[0][0]:box[1][0]] += 1
+
+def apply_threshold(heatmap, threshold):
+    # Zero out pixels below the threshold
+    heatmap[heatmap <= threshold] = 0
+    # Return thresholded map
+    return heatmap
+
+def draw_labeled_bboxes(img, labels):
+    # Iterate through all detected cars
+    for car_number in range(1, labels[1]+1):
+        # Find pixels with each car_number label value
+        nonzero = (labels[0] == car_number).nonzero()
+        # Identify x and y values of those pixels
+        nonzeroy = np.array(nonzero[0])
+        nonzerox = np.array(nonzero[1])
+        # Define a bounding box based on min/max x and y
+        bbox = ((np.min(nonzerox), np.min(nonzeroy)), (np.max(nonzerox), np.max(nonzeroy)))
+        # Draw the box on the image
+        cv2.rectangle(img, bbox[0], bbox[1], (0,0,255), 6)
+    # Return the image
+    return img
+
 # Define a single function that can extract features using hog sub-sampling and make predictions
 def find_cars(img, ystart, ystop, scale, svc, X_scaler):   
     draw_img = np.copy(img)
@@ -194,108 +221,83 @@ def find_cars(img, ystart, ystop, scale, svc, X_scaler):
     imshape = imgToSearch.shape
 
     if scale != 1:
-        imgToSearch = cv2.resize(imgToSearch, (np.int(imshape[1]/scale), np.int(imshape[0]/scale)))
+        imgToSearch = cv2.resize(imgToSearch, (np.int(imshape[1]/scale), np.int(imshape[0]/scale))).astype(np.float32)
         imshape = imgToSearch.shape
     
-    windows = slide_window(imgToSearch)
-    
-    # Compute individual channel HOG features for the entire (cropped) image
-    # HOG = hog_by_chan(imgToSearch, rav=False)
-    # hogger = get_hog_features(imgToSearch, feature_vec=False)
-    
-    for window in windows:
-        # Extract HOG for this patch
-        x_y = window[0]
-        x1_y1 = window[1]
-        # hog_feat = []
-        # for h in HOG:
-        #     hog_feat = h[xpos[0]:ypos[0], xpos[1]:ypos[1]].ravel() 
-        # hog_features = np.hstack(tuple(hog_feat))
-        # Extract the image patch
-        subimg = cv2.resize(imgToSearch[x_y[1]:x1_y1[1], x_y[0]:x1_y1[0]], (64,64))
-        hog_features = hog_by_chan(subimg, rav=True)
-        s_and_hist_feats = extract_features(subimg,Hogs=False)
-        # Get color features
-        # spatial_features = bin_spatial(subimg, size=spatial_size)
-        # hist_features = color_hist(subimg)
-        test_features = X_scaler.transform(np.concatenate((s_and_hist_feats, hog_features)).reshape(1, -1))   
+    # 64 was the orginal sampling rate, with 8 cells and 8 pix per cell
+    window = 64
+    nblocks_per_window = (window // ppc) - cpb + 1
+    cells_per_step = 6  # Instead of overlap, define how many cells to step
+    nxblocks = (imgToSearch.shape[1] // ppc) - cpb + 1
+    nyblocks = (imgToSearch.shape[0] // ppc) - cpb + 1
+    nxsteps = (nxblocks - nblocks_per_window) // cells_per_step + 1
+    nysteps = (nyblocks - nblocks_per_window) // cells_per_step + 1
+    # windows = slide_window(imgToSearch,xy_overlap=(0.25, 0.25))
 
-        # Scale features and make a prediction
-        test_prediction = svc.predict(test_features)
-        
-        if test_prediction == 1:
-            xbox_left = np.int(x_y[0]*scale)
-            ytop_draw = np.int(x_y[1]*scale)
-            win_draw = np.int(64*scale)
-            boxes.append([(xbox_left, ytop_draw+ystart),(xbox_left+win_draw,ytop_draw+win_draw+ystart)])
+    # get the image hog features
+    hog_features_list = hog_by_chan(imgToSearch, rav=False)
 
-    draw_img = draw_boxes(draw_img, boxes)                
-    return draw_img
+    for xb in range(nxsteps):
+        for yb in range(nysteps):
+            hog_feat_list = []
+            ypos = yb*cells_per_step
+            xpos = xb*cells_per_step
+            x_y = [xpos*ppc,ypos*ppc]
+            x1_y1 = [xpos*ppc+window,ypos*ppc+window]
+            # Extract the image patch
+            subimg = cv2.resize(imgToSearch[x_y[1]:x1_y1[1], x_y[0]:x1_y1[0]], (64,64))
+            for hf in hog_features_list:
+                hog_feat_list.append(hf[ypos:ypos+nblocks_per_window, xpos:xpos+nblocks_per_window].ravel())
+            hog_features = np.hstack(tuple(hog_feat_list))
+            # Get color features
+            s_and_hist_feats = extract_features(subimg,Hogs=False, spatial_size=rsize)
+            # concatenate and transform features
+            test_features = X_scaler.transform(np.concatenate((s_and_hist_feats, hog_features)).reshape(1, -1))   
+            # Scale features and make a prediction
+            test_prediction = svc.predict(test_features)
+            # Define boxes around positive predictions
+            if test_prediction == 1:
+                xbox_left = np.int(x_y[0]*scale)
+                ytop_draw = np.int(x_y[1]*scale)
+                win_draw = np.int(64*scale)
+                boxes.append([(xbox_left, ytop_draw+ystart),(xbox_left+win_draw,ytop_draw+win_draw+ystart)])
+    return boxes
 
-# Define a single function that can extract features using hog sub-sampling and make predictions
-# def find_cars(img, ystart, ystop, scale, svc, X_scaler):   
-#     draw_img = np.copy(img)
-#     img = img.astype(np.float32)
-#     boxes = []
-    
-#     # Only searching relevant parts of the image
-#     imgToSearch = img[ystart:ystop,:,:]
-#     imshape = imgToSearch.shape
+# Define a class to keep track of found vehicles
+class vehicle_tracker():
+    def __init__(self):
+        # Number of vehicles found
+        self.nVehicles = 0
+        # Bounding boxes for vehicles
+        self.vBBoxes = []
 
-#     if scale != 1:
-#         imgToSearch = cv2.resize(imgToSearch, (np.int(imshape[1]/scale), np.int(imshape[0]/scale)))
-#         imshape = imgToSearch.shape
-
-#     # Define blocks and steps as above
-#     nxblocks = (imshape[1] // ppc) - cpb + 1
-#     nyblocks = (imshape[0] // ppc) - cpb + 1 
-    
-#     # 64 was the orginal sampling rate, with 8 cells and 8 pix per cell
-#     window = 64
-#     nblocks_per_window = (window // ppc) - cpb + 1
-#     cells_per_step = 4  # Instead of overlap, define how many cells to step
-#     nxsteps = (nxblocks - nblocks_per_window) // cells_per_step + 1
-#     nysteps = (nyblocks - nblocks_per_window) // cells_per_step + 1
-#     if nysteps == 0: nysteps = 1
-    
-#     # Compute individual channel HOG features for the entire (cropped) image
-#     HOG = hog_by_chan(imgToSearch, rav=False)
-#     # hogger = get_hog_features(imgToSearch, feature_vec=False)
-    
-#     for xb in range(nxsteps):
-#         for yb in range(nysteps):
-#             ypos = yb*cells_per_step
-#             xpos = xb*cells_per_step
-#             # Extract HOG for this patch
-#             hog_feat = []
-#             for h in HOG:
-#                 hog_feat = h[ypos:ypos+nblocks_per_window, xpos:xpos+nblocks_per_window].ravel() 
-#             hog_features = np.hstack(tuple(hog_feat))
-#             # hogger_feat = hogger[ypos:ypos+nblocks_per_window, xpos:xpos+nblocks_per_window].ravel() 
-
-#             xleft = xpos*ppc
-#             ytop = ypos*ppc
-
-#             # Extract the image patch
-#             subimg = cv2.resize(imgToSearch[ytop:ytop+window, xleft:xleft+window], (64,64))
-#             s_and_hist_feats = extract_features(subimg,Hogs=False)
-
-#             # Get color features
-#             # spatial_features = bin_spatial(subimg, size=spatial_size)
-#             # hist_features = color_hist(subimg)
-#             test_features = X_scaler.transform(np.concatenate((s_and_hist_feats, hog_features)).reshape(1, -1))   
-
-#             # Scale features and make a prediction
-#             test_prediction = svc.predict(test_features)
-            
-#             if test_prediction == 1:
-#                 xbox_left = np.int(xleft*scale)
-#                 ytop_draw = np.int(ytop*scale)
-#                 win_draw = np.int(window*scale)
-#                 boxes.append([(xbox_left, ytop_draw+ystart),(xbox_left+win_draw,ytop_draw+win_draw+ystart)])
-
-#     draw_boxes(draw_img, boxes)                
-#     return draw_img
+def detector(img, tracker, thresh=1, search_area=None):
+    image = np.copy(img)
+    carmap=[]
+    if not search_area:
+        search_area = [[375,500,.5],[375,525,1],[475,675,2.5],[500,720,3]]
+    for sa in search_area:
+        carmap =carmap+find_cars(image, sa[0], sa[1], sa[2], clf, X_scaler)
+    heat = np.zeros_like(image[:,:,0]).astype(np.float32)
+    # Add heat to each box in box list
+    add_heat(heat,carmap)
+    # Apply threshold to help remove false positives
+    heat = apply_threshold(heat,thresh)
+    # Visualize the heatmap when displaying    
+    heatmap = np.clip(heat, 0, 255)
+    # Find final boxes from heatmap using label function
+    labels = label(heatmap)
+    # Create a small heatmap image to put in the corner of the video
+    hmap = np.zeros_like(image)
+    hmap[:,:,0] = heatmap*(255//np.amax(heatmap))
+    hmap[:,:,1] = heatmap
+    hmap[:,:,2] = heatmap
+    wshp=image.shape
+    smallhmap = cv2.resize(hmap,(np.int(wshp[1]/4), np.int(wshp[0]/4)))
+    sshp=smallhmap.shape
+    window_img = draw_labeled_bboxes(image, labels)
+    window_img[0:sshp[0], wshp[1]-sshp[1]:wshp[1]] = smallhmap
+    return window_img
 
 if __name__ == '__main__':
     # Note: all images are expected to be in the BGR color space when passed to a function
@@ -338,29 +340,50 @@ if __name__ == '__main__':
     t2 = time.time()
     print(round(t2-t, 2), 'Seconds to normalize, split and shuffle data...')
 
+    grid = None
     if os.path.exists("pantry/paramVals.p"):
         print("Opening pickeld paramValues... They don't spoil if sealed right :)\n")
         paramVals = pickle.load( open( "pantry/paramVals.p", "rb" ) )
-        C = paramVals["C"]
-        gamma = paramVals["gamma"]
+        C = paramVals["classify__C"]
+        gamma = paramVals["classify__gamma"]
+        kernel = paramVals["classify__kernel"]
     else:
         t = time.time()
+        # source: http://scikit-learn.org/stable/auto_examples/plot_compare_reduction.html#sphx-glr-auto-examples-plot-compare-reduction-py
+        pipe = Pipeline([
+            ('reduce_dim', PCA()),
+            ('classify', SVC())
+        ])
+        #http://scikit-learn.org/stable/auto_examples/plot_compare_reduction.html#sphx-glr-auto-examples-plot-compare-reduction-py
         # source: http://scikit-learn.org/stable/auto_examples/svm/plot_rbf_parameters.html#sphx-glr-auto-examples-svm-plot-rbf-parameters-py
         # go through many C and gamma variables to get the ones that should work the best
-        C_range = np.logspace(-3, 3, 10)
-        gamma_range = np.logspace(-3, 3)
-        parameters = { 'kernel':('linear', 'poly', 'rbf'), 'C': C_range, 'gamma':gamma_range}
+        # C_range = np.logspace(-1, 4, 5)
+        C_range = [10,100,1000]
+        gamma_range = [1e-4]
+        n_components = [16,64]
+        param_grid = [
+            {
+                'reduce_dim__n_components': n_components,
+                'classify__kernel':['linear'],
+                'classify__C': C_range,
+                'classify__gamma': gamma_range,
+            }
+        ]
+        # parameters = { 'kernel':('linear', 'poly', 'rbf'), 'C': C_range, 'gamma':gamma_range}
         print("Starting Grid Search for best parameters")
-        grid = GridSearchCV(SVC(), parameters, verbose=5)
+        # grid = GridSearchCV(SVC(), parameters, n_jobs=6, verbose=5)
+        grid = GridSearchCV(pipe, cv=3, n_jobs=6, verbose=5, param_grid=param_grid)
         # fit to a subsample of the data, this takes a long time as it is and we are only looking
         # for a rough estimate of which hyper paramters will work the best
-        grid.fit(X_train, y_train)
-        C = grid.best_params_["C"]
-        gamma = grid.best_params_["gamma"]
+        grid.fit(X_train[:1000], y_train[:1000])
+        C = grid.best_params_["classify__C"]
+        gamma = grid.best_params_["classify__gamma"]
+        kernel = grid.best_params_["classify__kernel"]
         t2 = time.time()
         print(round(t2-t, 2), 'Seconds to train and fit SVM...')
         # pickle them for later consumption
         pickle.dump( grid.best_params_, open("pantry/paramVals.p", "wb"))
+        pickle.dump( grid.best_estimator_, open("pantry/estimator.p", "wb"))
         print("The best parameters are %s with a score of %0.2f"
             % (grid.best_params_, grid.best_score_))
         print("\nParameters pickled and put in pantry/")
@@ -373,24 +396,29 @@ if __name__ == '__main__':
         # uncomment the next line to get an accuracy readout of the read in classifier
         # print('This Classifier has a Test Accuracy of ', round(clf.score(X_test, y_test), 4)*100,"%")
     else:
+        print("Fitting best classifier to full dataset")
         t = time.time()
-        print("Fitting classifier")
-        clf = SVC(kernel='linear', C=C, gamma=gamma, verbose=True)
-        clf.fit(X_train, y_train)
-        print('Test Accuracy of SVC = ', round(clf.score(X_test, y_test), 4)*100,"%")
+        svm = SVC()
+        pca = PCA()
+        pipe = Pipeline([('reduce_dim', pca), ('classify', svm)])
+        clf = pipe.set_params(classify__kernel=kernel, classify__C=C,classify__gamma=gamma, classify__probability=True).fit(X_train, y_train)
+        pickle.dump( clf, open("pantry/classifier.p", "wb"))
+        score = clf.score(X_test,y_test)
+        print("Accuracy of classifier = ", score)
         # pickle them for later consumption
         pickle.dump( {"classifier":clf }, open("pantry/classifier.p", "wb"))
         t2 = time.time()
         print(round(t2-t, 2), 'Seconds to train, fit and save classifier...')
         print("Classifier pickled and put in pantry/")
 
-    image = cv2.imread("test/example-image.png")
-    window_img = find_cars(image, 440,656,1,clf,X_scaler)
-    # windows = slide_window(image, x_start_stop=[0, image.shape[1]], y_start_stop=[0,image.shape[0]], 
-    #                 xy_window=(128, 128), xy_overlap=(0.5, 0.5))
-    # window_img = draw_boxes(image, windows, color=(0, 0, 255), thick=6)
-    import matplotlib.pyplot as plt
-    import matplotlib.image as mpimg                    
-    plt.figure()
-    plt.imshow(window_img)
+    tracker = vehicle_tracker()
+    image = cv2.imread("test/tester003.png")
+    tracker = vehicle_tracker()
+    imout = detector(image, tracker)
+    plt.figure(figsize=(12,10))
+    plt.imshow(cv2.cvtColor(imout,cv2.COLOR_BGR2RGB))
     plt.show()
+    # outvid = 'output_videos\\test.mp4'
+    # clip1 = VideoFileClip('video\\hard.mp4', audio=False)
+    # result_clip = clip1.fl_image (lambda x: detector(x, tracker)) #NOTE: this function expects color images!!
+    # result_clip.write_videofile(outvid, audio=False, verbose=False)
