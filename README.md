@@ -61,7 +61,7 @@ Code cell 13 in vehicle_detection.ipynb shows the output from my pipeline with a
 
 #### Link to annotated video output. 
 
-Here's a [link to my video.](./video_out/proj_video_out.mp4)
+Here's a [link to my video.](https://github.com/ryan-jonesford/vehicle_detection/blob/master/output_videos/proj_video_out.mp4)
 It performs okay, not as well as I'd like, with more false positives than I'd accept if I had more time and support. However I feel the vehicles are detected well, even with the boxes being a tad unstable. I've also added the heatmap output to the top right of the video to aid in general understanding of the bounding boxes.
 
 
